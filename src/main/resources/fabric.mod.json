@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "reincarnationboard",
+  "version": "${version}",
+  "name": "转生苹果公告栏",
+  "description": "纯服务端模组：用原版记分板侧栏（积分板）在屏幕右侧常驻显示「转生苹果」积分前 N 名；标题、公告文字、名次格式、颜色都可在配置里改，客户端不用装任何东西。",
+  "authors": [],
+  "contact": {},
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.example.reincarnationboard.ReincarnationBoard"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.0",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  },
+  "suggests": {
+    "reincarnationapple": "*"
+  }
+}
