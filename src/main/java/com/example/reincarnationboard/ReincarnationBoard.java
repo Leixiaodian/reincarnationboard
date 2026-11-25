@@ -7,15 +7,16 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * 服务端入口。
  * <p>
- * 公告栏不是自定义 HUD，而是驱动原版记分板侧栏：先在记分板上建一个目标，
- * 再把每一行写成一个「假玩家」的分数行，并把它设为 sidebar 显示。
- * 这样原版客户端就能看到，客户端不用装任何模组。
+ * 公告栏用原版记分板侧栏实现：服务端维护一个共享目标 {@code rb_board}，
+ * 另外给每个在线玩家单独下发一行「我的积分」（客户端本地的额外分数行，不写进服务端记分板）。
+ * 客户端不需要装模组，原版客户端即可显示。
  */
 public class ReincarnationBoard implements ModInitializer {
 
@@ -29,6 +30,8 @@ public class ReincarnationBoard implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(BoardService::tick);
         ServerLifecycleEvents.SERVER_STARTED.register(server -> BoardService.refresh(server, true));
         ServerLifecycleEvents.SERVER_STOPPING.register(BoardService::onServerStopping);
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
+                BoardService.onPlayerJoin(server, handler.player));
 
         CommandRegistrationCallback.EVENT.register(
                 (dispatcher, registryAccess, environment) -> BoardCommand.register(dispatcher));

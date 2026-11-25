@@ -59,7 +59,7 @@ public final class BoardCommand {
     }
 
     private static int status(CommandContext<CommandSourceStack> context) {
-        List<String> lines = BoardService.describe(context.getSource().getServer());
+        List<String> lines = BoardService.describe(context.getSource().getServer(), context.getSource().getPlayer());
         for (String line : lines) {
             context.getSource().sendSuccess(() -> Component.literal(line), false);
         }

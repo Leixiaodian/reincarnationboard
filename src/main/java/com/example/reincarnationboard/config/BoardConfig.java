@@ -19,8 +19,8 @@ import java.util.List;
  * 首次启动生成 {@code config/reincarnationboard.json}，改完执行 {@code /reincarnationboard reload} 即可生效，
  * 不需要重启服务器。所有文字都支持原版 {@code §} 颜色/格式码。
  * <p>
- * 因为公告栏是用原版记分板侧栏实现的，侧栏内容对全服所有玩家相同，
- * 所以占位符只支持全服信息：{@code %online%} {@code %count%}，
+ * 排行榜和公告对所有玩家相同；「我的积分」行是每个玩家单独下发的，所以可以用
+ * {@code %player%} {@code %score%} {@code %rank%}。公共行可用 {@code %online%} {@code %count%}
  * 以及 {@code %top1%} {@code %top1_name%} {@code %top1_score%}（数字可换）。
  */
 public final class BoardConfig {
@@ -56,12 +56,23 @@ public final class BoardConfig {
     /** 低于该积分的玩家不上榜。 */
     public int minScore = 1;
 
+    // ===== 我的积分（每个玩家单独下发） =====
+
+    /** 是否显示「我的积分」一行。这一行由服务端单独发给每个玩家，不写进共享记分板。 */
+    public boolean showOwnScore = true;
+
+    /** 「我的积分」行格式。占位符：%player% %score% %rank%。留空则不显示。 */
+    public String ownFormat = "§b我的积分：§e%score%";
+
+    /** 自己没上榜时 %rank% 的替代文字。 */
+    public String ownUnrankedText = "§7未上榜";
+
     // ===== 自定义公告文字 =====
 
-    /** 标题下方、排行榜上方的自定义文字行（可写公告）。支持全部占位符。 */
+    /** 标题下方、排行榜上方的自定义文字行（可写公告）。支持公共占位符。 */
     public List<String> headerLines = new ArrayList<>();
 
-    /** 排行榜下方的自定义文字行（可写公告）。支持全部占位符。 */
+    /** 排行榜下方的自定义文字行（可写公告）。支持公共占位符。 */
     public List<String> footerLines = new ArrayList<>();
 
     /** 未安装「转生苹果」时显示的文字；留空则什么也不显示。 */
@@ -126,6 +137,8 @@ public final class BoardConfig {
         this.emptyText = nullTo(this.emptyText, "");
         this.missingModText = nullTo(this.missingModText, "");
         this.unrankedText = nullTo(this.unrankedText, "");
+        this.ownFormat = nullTo(this.ownFormat, "§b我的积分：§e%score%");
+        this.ownUnrankedText = nullTo(this.ownUnrankedText, "§7未上榜");
         this.headerLines = clean(this.headerLines);
         this.footerLines = clean(this.footerLines);
         this.rankColors = clean(this.rankColors);

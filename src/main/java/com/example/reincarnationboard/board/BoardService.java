@@ -4,6 +4,9 @@ import com.example.reincarnationboard.ReincarnationBoard;
 import com.example.reincarnationboard.config.BoardConfig;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.numbers.BlankFormat;
+import net.minecraft.network.chat.numbers.NumberFormat;
+import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
+import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.players.NameAndId;
@@ -17,22 +20,30 @@ import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
  * 用原版记分板侧栏（sidebar）来显示公告栏。
  * <p>
- * 做法：
+ * 共享部分：
  * <ul>
  *   <li>建一个记分板目标 {@value #OBJECTIVE_NAME}，目标的显示名就是公告栏标题；</li>
  *   <li>每一行公告 / 名次用一个「假玩家」分数行表示，行的显示文字用 Score 的 display 覆盖、</li>
  *   <li>顺序靠分数值控制：公告用极大值、玩家名次用真实积分、页脚用极小值；</li>
  *   <li>文字行把分数格式设为 blank（不显示数字），名次行保留原版数字，让分数右对齐显示。</li>
  * </ul>
- * 全部是原版数据，原版客户端即可显示。
+ * 每个玩家自己的一行：
+ * <ul>
+ *   <li>「我的积分」用 {@link ClientboundSetScorePacket} 单独发给对应玩家，只存在于这个客户端的本地记分板里，
+ *       不会写进服务端共享记分板，所以每个玩家看到的都是自己的分数；</li>
+ *   <li>它排在本服名次之后、页脚之前，数字隐藏（分数直接写在文字里）。</li>
+ * </ul>
+ * 全部是原版数据包，原版客户端即可显示。
  */
 public final class BoardService {
 
@@ -42,6 +53,10 @@ public final class BoardService {
     /** 原版侧栏最多显示 15 行。 */
     private static final int MAX_ROWS = 15;
     private static final String HOLDER_PREFIX = "rb_";
+    /** 「我的积分」的客户端本地分数行，只发给单个玩家。 */
+    private static final String OWN_HOLDER = "rb_own";
+    /** 排在本服名次（>=0）之后、页脚（Integer.MIN_VALUE + 小数字）之前。 */
+    private static final int OWN_VALUE = Integer.MIN_VALUE + 100;
 
     private static int ticks;
     private static String lastSignature = "";
@@ -49,6 +64,10 @@ public final class BoardService {
     private static Objective previousSidebar;
     private static boolean truncationLogged;
     private static boolean failureLogged;
+
+    private static final Map<UUID, String> LAST_OWN = new HashMap<>();
+    /** 刚进服时多补发几次，避免目标还没同步到客户端导致这一行丢失。 */
+    private static final Map<UUID, Integer> OWN_RESEND = new HashMap<>();
 
     private BoardService() {
     }
@@ -60,6 +79,13 @@ public final class BoardService {
             return;
         }
         ticks = 0;
+        refresh(server, false);
+    }
+
+    /** 玩家进服：强制补发一次「我的积分」行。 */
+    public static void onPlayerJoin(MinecraftServer server, ServerPlayer player) {
+        LAST_OWN.remove(player.getUUID());
+        OWN_RESEND.put(player.getUUID(), 2);
         refresh(server, false);
     }
 
@@ -78,11 +104,11 @@ public final class BoardService {
                 return;
             }
             String signature = signature(lines, config);
-            if (!force && signature.equals(lastSignature)) {
-                return;
+            if (force || !signature.equals(lastSignature)) {
+                lastSignature = signature;
+                applyLines(server, objective, lines);
             }
-            lastSignature = signature;
-            applyLines(server, objective, lines);
+            applyOwnLines(server, snapshot, config, force);
         } catch (Throwable t) {
             if (!failureLogged) {
                 failureLogged = true;
@@ -91,8 +117,8 @@ public final class BoardService {
         }
     }
 
-    /** 给命令用的调试/排查信息：当前公告栏每行实际显示的内容。 */
-    public static List<String> describe(MinecraftServer server) {
+    /** 给命令用的调试/排查信息：当前公告栏每行实际显示的内容（含执行者自己的「我的积分」行）。 */
+    public static List<String> describe(MinecraftServer server, ServerPlayer viewer) {
         Scoreboard scoreboard = server.getScoreboard();
         Objective objective = scoreboard.getObjective(OBJECTIVE_NAME);
         if (objective == null) {
@@ -107,6 +133,16 @@ public final class BoardService {
         for (net.minecraft.world.scores.PlayerScoreEntry entry : entries) {
             out.add(entry.ownerName().getString() + " | 值=" + entry.value()
                     + (entry.numberFormatOverride() == null ? "" : " | 隐藏数字"));
+        }
+        BoardConfig config = BoardConfig.get();
+        if (viewer != null) {
+            if (!config.showOwnScore) {
+                out.add("我的积分行: 已关闭（showOwnScore=false）");
+            } else {
+                Snapshot snapshot = Snapshot.build(server, config);
+                OwnLine own = buildOwnLine(viewer, snapshot, config, server.getPlayerList().getPlayerCount());
+                out.add("我的积分行: " + (own == null ? "(不显示)" : own.text()));
+            }
         }
         return out;
     }
@@ -164,6 +200,86 @@ public final class BoardService {
         }
     }
 
+    /** 给每个在线玩家单独下发/更新「我的积分」行（只存在于客户端本地记分板）。 */
+    private static void applyOwnLines(MinecraftServer server, Snapshot snapshot, BoardConfig config, boolean force) {
+        List<ServerPlayer> players = server.getPlayerList().getPlayers();
+        int onlineCount = players.size();
+        Set<UUID> online = new HashSet<>();
+        for (ServerPlayer player : players) {
+            UUID id = player.getUUID();
+            online.add(id);
+            OwnLine own = buildOwnLine(player, snapshot, config, onlineCount);
+            int resend = OWN_RESEND.getOrDefault(id, 0);
+            if (own == null) {
+                boolean had = LAST_OWN.remove(id) != null;
+                OWN_RESEND.remove(id);
+                if (had) {
+                    sendOwnReset(player);
+                }
+                continue;
+            }
+            boolean changed = !own.text().equals(LAST_OWN.get(id));
+            if (!force && !changed && resend <= 0) {
+                continue;
+            }
+            try {
+                player.connection.send(new ClientboundSetScorePacket(OWN_HOLDER, OBJECTIVE_NAME, OWN_VALUE,
+                        Optional.of(own.display()), Optional.<NumberFormat>of(BlankFormat.INSTANCE)));
+                LAST_OWN.put(id, own.text());
+                if (resend > 0) {
+                    OWN_RESEND.put(id, resend - 1);
+                }
+            } catch (Throwable t) {
+                if (!failureLogged) {
+                    failureLogged = true;
+                    ReincarnationBoard.LOGGER.error("下发「我的积分」行失败（后续相同错误不再重复输出）", t);
+                }
+            }
+        }
+        LAST_OWN.keySet().retainAll(online);
+        OWN_RESEND.keySet().retainAll(online);
+    }
+
+    private static void sendOwnReset(ServerPlayer player) {
+        try {
+            player.connection.send(new ClientboundResetScorePacket(OWN_HOLDER, OBJECTIVE_NAME));
+        } catch (Throwable ignored) {
+            // 玩家可能正在断开，忽略。
+        }
+    }
+
+    private static OwnLine buildOwnLine(ServerPlayer player, Snapshot snapshot, BoardConfig config, int onlineCount) {
+        if (!ownLineEnabled(config) || !snapshot.available()) {
+            return null;
+        }
+        int score = 0;
+        try {
+            score = ScoreSource.getScore(player);
+        } catch (Throwable ignored) {
+            // 接口异常时按 0 显示，不影响其他行。
+        }
+        int rank = 0;
+        List<RankedPlayer> ranked = snapshot.ranked();
+        for (int i = 0; i < ranked.size(); i++) {
+            if (ranked.get(i).id().equals(player.getUUID())) {
+                rank = i + 1;
+                break;
+            }
+        }
+        Map<String, String> values = new HashMap<>();
+        values.put("player", player.getName().getString());
+        values.put("score", String.valueOf(score));
+        values.put("rank", rank > 0 ? String.valueOf(rank) : config.ownUnrankedText);
+        values.put("online", String.valueOf(onlineCount));
+        values.put("count", String.valueOf(ranked.size()));
+        String text = Texts.fill(config.ownFormat, values, config.maxLineChars);
+        return text.isEmpty() ? null : new OwnLine(text, LegacyText.parse(text));
+    }
+
+    private static boolean ownLineEnabled(BoardConfig config) {
+        return config.showOwnScore && !config.ownFormat.isEmpty();
+    }
+
     private static void hide(MinecraftServer server) {
         Scoreboard scoreboard = server.getScoreboard();
         Objective objective = scoreboard.getObjective(OBJECTIVE_NAME);
@@ -184,6 +300,8 @@ public final class BoardService {
         active = false;
         previousSidebar = null;
         lastSignature = "";
+        LAST_OWN.clear();
+        OWN_RESEND.clear();
     }
 
     private static List<Line> buildLines(Snapshot snapshot, BoardConfig config, int online) {
@@ -205,9 +323,11 @@ public final class BoardService {
             }
         }
 
-        List<Line> lines = new ArrayList<>(MAX_ROWS);
+        // 「我的积分」是客户端本地额外一行，也要占原版 15 行里的一行。
+        int rowLimit = ownLineEnabled(config) ? MAX_ROWS - 1 : MAX_ROWS;
+        List<Line> lines = new ArrayList<>(rowLimit);
         for (String raw : config.headerLines) {
-            if (lines.size() >= MAX_ROWS) {
+            if (lines.size() >= rowLimit) {
                 warnTruncation();
                 break;
             }
@@ -217,7 +337,7 @@ public final class BoardService {
 
         if (snapshot.available()) {
             int shown = Math.min(config.topCount, ranked.size());
-            for (int i = 0; i < shown && lines.size() < MAX_ROWS; i++) {
+            for (int i = 0; i < shown && lines.size() < rowLimit; i++) {
                 RankedPlayer row = ranked.get(i);
                 String color = colorFor(i, config);
                 Map<String, String> lineValues = Map.of(
@@ -227,16 +347,16 @@ public final class BoardService {
                 String text = Texts.fill(color + config.rankFormat, lineValues, config.maxLineChars);
                 lines.add(new Line(text, row.score(), LegacyText.parse(text), false));
             }
-            if (shown == 0 && !config.emptyText.isEmpty() && lines.size() < MAX_ROWS) {
+            if (shown == 0 && !config.emptyText.isEmpty() && lines.size() < rowLimit) {
                 String text = Texts.fill(config.emptyText, values, config.maxLineChars);
                 lines.add(new Line(text, Integer.MAX_VALUE - lines.size(), LegacyText.parse(text), true));
             }
-        } else if (!config.missingModText.isEmpty() && lines.size() < MAX_ROWS) {
+        } else if (!config.missingModText.isEmpty() && lines.size() < rowLimit) {
             String text = Texts.fill(config.missingModText, values, config.maxLineChars);
             lines.add(new Line(text, Integer.MAX_VALUE - lines.size(), LegacyText.parse(text), true));
         }
 
-        int footerCount = Math.min(config.footerLines.size(), MAX_ROWS - lines.size());
+        int footerCount = Math.min(config.footerLines.size(), rowLimit - lines.size());
         if (footerCount < config.footerLines.size()) {
             warnTruncation();
         }
@@ -269,12 +389,16 @@ public final class BoardService {
     private static void warnTruncation() {
         if (!truncationLogged) {
             truncationLogged = true;
-            ReincarnationBoard.LOGGER.warn("公告栏内容超过原版侧栏上限 {} 行，后面的行会被忽略；请减少 headerLines / footerLines 或 topCount。", MAX_ROWS);
+            ReincarnationBoard.LOGGER.warn("公告栏内容超过原版侧栏上限 {} 行（「我的积分」行也占一行），后面的行会被忽略；请减少 headerLines / footerLines 或 topCount。", MAX_ROWS);
         }
     }
 
     /** 一行：值决定排序，text 用于比较是否变化，display 是真正发给客户端的文字。 */
     private record Line(String text, int value, Component display, boolean blankNumber) {
+    }
+
+    /** 每个玩家自己的「我的积分」行。 */
+    private record OwnLine(String text, Component display) {
     }
 
     private static String resolveName(MinecraftServer server, UUID id) {

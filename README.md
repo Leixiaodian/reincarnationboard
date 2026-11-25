@@ -1,7 +1,8 @@
 # 转生苹果公告栏 (Reincarnation Board)
 
 Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板侧栏（积分板）**在屏幕右侧常驻显示
-「转生苹果」积分排行榜前 N 名，标题、公告文字、名次格式、颜色都能在配置文件里改。
+「转生苹果」积分排行榜前 N 名，**并且每个玩家还能看到自己的一行「我的积分」**；
+标题、公告文字、名次格式、颜色都能在配置文件里改。
 
 - **客户端不用装任何东西**，原版客户端就能看到（所有内容都是原版记分板数据）。
 - 服务端需要 Fabric Loader **>= 0.19.0** + Fabric API。
@@ -23,6 +24,8 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
 │   2. Bob           96   │
 │   3. Carol         64   │
 │                        │
+│   我的积分：96           │  ← 每个玩家自己的行（只在本人客户端显示）
+│                        │
 │   食用转生苹果进入维度   │  ← footerLines
 │   第一名：Alice         │
 └────────────────────────┘
@@ -33,10 +36,16 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
 名次行保留原版数字，所以积分会像记分板一样右对齐显示。
 内容变化时才写记分板，默认每秒检查一次。
 
+「我的积分」这一行不写进服务端共享记分板，而是用原版 `ClientboundSetScorePacket`
+**单独发给对应玩家**：每个客户端的本地记分板里多出自己的一行，各看各的，互相看不到。
+它排在本服名次之后、页脚之前（数字隐藏，分数直接写在文字里），同样走原版记分板渲染。
+刚进服时会多补发几次，避免目标还没同步到客户端导致这一行丢失。
+
 ### 限制（原版记分板本身的限制）
 
-- 侧栏最多 **15 行**。`headerLines` + 排行榜 + `footerLines` 超过 15 行时后面的行会被忽略（日志会提示一次）。
-- **全服玩家看到的内容相同**，没法显示「我的积分」这种按人变化的一行；积分前 N 名和公告对所有人都一样。
+- 侧栏最多 **15 行**。排行榜/公告是全服共享的，「我的积分」是每人本地额外的一行；开启 `showOwnScore` 时
+  共享部分最多只排 14 行（`headerLines` + 排行榜 + `footerLines`），超出的行会被忽略（日志会提示一次）。
+- 排行榜和公告对全服玩家相同；只有「我的积分」行是按人单独下发的。
 - 会**占用原版 sidebar 显示槽**。关闭模组（`/reincarnationboard toggle` 或把 `enabled` 改成 false 后重载）时，
   会移除自己创建的目标并恢复之前占用的那个侧栏目标。
 
@@ -59,6 +68,9 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
   "rankColors": ["§e", "§f", "§6"],
   "emptyText": "§7还没有人上榜",
   "minScore": 1,
+  "showOwnScore": true,
+  "ownFormat": "§b我的积分：§e%score%",
+  "ownUnrankedText": "§7未上榜",
   "headerLines": [],
   "footerLines": [],
   "missingModText": "§c未检测到「转生苹果」模组",
@@ -77,6 +89,9 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
 | `rankColors` | `["§e","§f","§6"]` | 第 1/2/3……名的前缀颜色，不够用时循环取最后一个。 |
 | `emptyText` | `§7还没有人上榜` | 排行榜为空时的提示行。留空则不显示。 |
 | `minScore` | `1` | 低于该积分的玩家不上榜。 |
+| `showOwnScore` | `true` | 是否给每个玩家显示自己的一行「我的积分」。 |
+| `ownFormat` | `§b我的积分：§e%score%` | 「我的积分」行格式，可用 `%player%` `%score%` `%rank%`；留空则不显示。 |
+| `ownUnrankedText` | `§7未上榜` | 自己没上榜时 `%rank%` 的替代文字。 |
 | `headerLines` | `[]` | 标题下方、排行榜上方的自定义文字（一行一个）。**公告写这里**。 |
 | `footerLines` | `[]` | 排行榜下方的自定义文字（一行一个）。 |
 | `missingModText` | `§c未检测到「转生苹果」模组` | 没装转生苹果时的提示。留空则不显示。 |
@@ -89,7 +104,7 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
 
 ### 2.2 占位符
 
-`title`、`headerLines`、`footerLines`、`rankFormat` 里都能用：
+公共行（`title`、`headerLines`、`footerLines`、`rankFormat`）可用：
 
 | 占位符 | 含义 |
 | --- | --- |
@@ -98,6 +113,16 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
 | `%topN%` | 第 N 名的「名字 分数」 |
 | `%topN_name%` | 第 N 名的名字 |
 | `%topN_score%` | 第 N 名的分数 |
+
+「我的积分」行（`ownFormat`）额外支持：
+
+| 占位符 | 含义 |
+| --- | --- |
+| `%player%` | 当前玩家名字 |
+| `%score%` | 当前玩家积分 |
+| `%rank%` | 当前玩家名次（没上榜时用 `ownUnrankedText`） |
+| `%online%` | 在线人数 |
+| `%count%` | 上榜人数 |
 
 `N` 从 1 开始，最大到 `topCount`（至少支持前 3 名）。
 
@@ -110,6 +135,7 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
   "headerLines": ["§e欢迎来到服务器", "§7在线：§f%online% §7人"],
   "footerLines": ["§7食用 §c转生苹果 §7进入维度", "§8第一名：%top1_name% §7· §8上榜 %count% 人"],
   "rankFormat": "%rank%. %name%",
+  "ownFormat": "§b我的积分：§e%score% §8(第 %rank% 名)",
   "maxLineChars": 28
 }
 ```
@@ -149,7 +175,7 @@ Minecraft **1.21.11** / Fabric 的**纯服务端**模组：用**原版记分板�
 gradle build --offline
 ```
 
-产物：`build/libs/reincarnationboard-1.1.0.jar`（部署时不要上传 `-sources.jar`）。
+产物：`build/libs/reincarnationboard-1.2.0.jar`（部署时不要上传 `-sources.jar`）。
 
 > `libs/reincarnationapple-1.0-SNAPSHOT.jar` 是编译/开发联调用的「转生苹果」API jar，
 > 只参与编译，不会被打进正式 jar；版本不一致时替换这个文件即可。
